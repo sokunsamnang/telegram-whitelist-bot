@@ -1,0 +1,50 @@
+{
+    "name": "telegram-whitelist-bot",
+    "version": "1.0.0",
+    "description": "A Node.js Telegram bot that automatically manages group access using a whitelist system to protect private groups from unauthorized users",
+    "main": "bot.js",
+    "scripts": {
+        "start": "node bot.js",
+        "dev": "nodemon bot.js",
+        "setup": "node setup.js",
+        "security-check": "node security-check.js",
+        "precommit": "npm run security-check",
+        "prepush": "npm run security-check",
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "verify": "node verify-setup.js"
+    },
+    "keywords": [
+        "telegram",
+        "bot",
+        "whitelist",
+        "moderation",
+        "nodejs",
+        "group-management",
+        "auto-kick",
+        "security",
+        "telegram-api",
+        "chat-bot"
+    ],
+    "author": "Telegram Whitelist Bot Contributors",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/sokunsamnang/telegram-whitelist-bot.git"
+    },
+    "bugs": {
+        "url": "https://github.com/sokunsamnang/telegram-whitelist-bot/issues"
+    },
+    "homepage": "https://github.com/sokunsamnang/telegram-whitelist-bot#readme",
+    "engines": {
+        "node": ">=14.0.0"
+    },
+    "dependencies": {
+        "node-telegram-bot-api": "^0.66.0",
+        "dotenv": "^16.3.1",
+        "fs": "^0.0.1-security",
+        "path": "^0.12.7"
+    },
+    "devDependencies": {
+        "nodemon": "^3.0.2"
+    }
+}
