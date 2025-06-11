@@ -50,6 +50,108 @@ async function getUserIdFromMessage(msg, targetUser) {
     return null;
 }
 
+// Helper function to perform user kick with comprehensive logging
+async function kickUser(chatId, userId, userInfo, reason = "Not on whitelist") {
+    try {
+        logger.info(`🚫 Attempting to kick user: ${userInfo}`);
+        logger.info(`   Chat ID: ${chatId}`);
+        logger.info(`   User ID: ${userId}`);
+        logger.info(`   Reason: ${reason}`);
+
+        // Get bot info first
+        const botInfo = await bot.getMe();
+        logger.info(
+            `🤖 Bot performing kick: ${botInfo.username} [ID: ${botInfo.id}]`
+        );
+
+        // Check bot permissions
+        const botMember = await bot.getChatMember(chatId, botInfo.id);
+        logger.info(`🔐 Bot permissions check:`);
+        logger.info(`   Status: ${botMember.status}`);
+        logger.info(
+            `   Can restrict members: ${botMember.can_restrict_members}`
+        );
+
+        if (
+            !botMember.can_restrict_members &&
+            botMember.status !== "administrator"
+        ) {
+            throw new Error(
+                `Bot lacks permission to kick members. Status: ${botMember.status}, Can restrict: ${botMember.can_restrict_members}`
+            );
+        }
+
+        // Perform the kick
+        await bot.banChatMember(chatId, userId);
+        logger.success(`✅ Successfully kicked user: ${userInfo}`);
+
+        // Only send kick notification to group if not in silent mode
+        if (config.ANNOUNCE_KICKS && !config.SILENT_MODE) {
+            try {
+                await bot.sendMessage(
+                    chatId,
+                    `🚫 User was removed (${reason.toLowerCase()})`
+                );
+            } catch (error) {
+                logger.warn("Could not send kick notification to group", {
+                    error: error.message,
+                });
+            }
+        }
+
+        // Schedule unban
+        setTimeout(async () => {
+            try {
+                await bot.unbanChatMember(chatId, userId);
+                logger.info(`🔓 Unbanned user: ${userInfo}`);
+            } catch (error) {
+                logger.warn("Could not unban user", {
+                    error: error.message,
+                });
+            }
+        }, config.UNBAN_DELAY || 5000);
+
+        // Notify admin
+        try {
+            await bot.sendMessage(
+                config.ADMIN_USER_ID,
+                `🚫 *User Kicked*\n\n**User:** ${userInfo}\n**Reason:** ${reason}\n**Chat:** ${chatId}\n**Time:** ${new Date().toISOString()}`,
+                { parse_mode: "Markdown" }
+            );
+        } catch (error) {
+            logger.warn("Could not notify admin", {
+                error: error.message,
+            });
+        }
+
+        return true;
+    } catch (error) {
+        logger.error(`❌ Failed to kick user: ${userInfo}`, {
+            error: error.message,
+            chatId,
+            userId,
+            reason,
+        });
+
+        // Notify admin of failure
+        try {
+            await bot.sendMessage(
+                config.ADMIN_USER_ID,
+                `❌ *KICK FAILED*\n\n**User:** ${userInfo}\n**Error:** ${
+                    error.message
+                }\n**Chat:** ${chatId}\n**Time:** ${new Date().toISOString()}\n\n*Please check bot permissions!*`,
+                { parse_mode: "Markdown" }
+            );
+        } catch (notifyError) {
+            logger.error("Could not notify admin of kick failure", {
+                error: notifyError.message,
+            });
+        }
+
+        return false;
+    }
+}
+
 // Event: Bot started
 bot.on("polling_start", async () => {
     logger.success("🤖 Telegram Whitelist Bot started successfully!");
@@ -116,14 +218,23 @@ bot.on("polling_start", async () => {
 // Event: New chat members (someone joined)
 bot.on("new_chat_members", async (msg) => {
     const chatId = msg.chat.id.toString();
+    const configGroupId = config.GROUP_ID.toString();
+
+    // Debug logging for chat ID comparison
+    logger.info(`📍 Join event received:`);
+    logger.info(`   Chat ID: ${chatId}`);
+    logger.info(`   Config Group ID: ${configGroupId}`);
+    logger.info(`   Match: ${chatId === configGroupId}`);
 
     // Only monitor the configured group
-    if (chatId !== config.GROUP_ID.toString()) {
-        logger.info(`Ignoring join event from different chat: ${chatId}`);
+    if (chatId !== configGroupId) {
+        logger.info(
+            `Ignoring join event from different chat: ${chatId} (expected: ${configGroupId})`
+        );
         return;
     }
 
-    logger.info(`New member event in monitored group: ${chatId}`);
+    logger.success(`✅ Processing join event in monitored group: ${chatId}`);
 
     for (const newMember of msg.new_chat_members) {
         // Skip bots (except if specifically configured to allow them)
@@ -141,8 +252,8 @@ bot.on("new_chat_members", async (msg) => {
         if (whitelist.isWhitelisted(userId)) {
             logger.success(`✅ Whitelisted user joined: ${userInfo}`);
 
-            // Send welcome message (optional)
-            if (config.SEND_WELCOME_MESSAGE) {
+            // Send welcome message only if not in silent mode
+            if (config.SEND_WELCOME_MESSAGE && !config.SILENT_MODE) {
                 try {
                     await bot.sendMessage(
                         chatId,
@@ -154,117 +265,32 @@ bot.on("new_chat_members", async (msg) => {
                     });
                 }
             }
+
+            // Notify admin about whitelisted user join (optional)
+            if (config.NOTIFY_ADMIN_ONLY) {
+                try {
+                    await bot.sendMessage(
+                        config.ADMIN_USER_ID,
+                        `✅ *Whitelisted User Joined*\n\n**User:** ${userInfo}\n**Group:** ${
+                            msg.chat.title || chatId
+                        }\n**Time:** ${new Date().toISOString()}`,
+                        { parse_mode: "Markdown" }
+                    );
+                } catch (error) {
+                    logger.warn(
+                        "Could not notify admin about whitelisted user",
+                        {
+                            error: error.message,
+                        }
+                    );
+                }
+            }
         } else {
             logger.warn(`⚠️ Non-whitelisted user joined: ${userInfo}`);
 
             if (config.AUTO_KICK_ENABLED) {
-                let chatMember = null;
-
-                try {
-                    // Get bot info to get the bot's user ID
-                    const botInfo = await bot.getMe();
-                    logger.info(
-                        `🤖 Bot info: ${botInfo.username} [ID: ${botInfo.id}]`
-                    );
-                    logger.info(`📍 Checking permissions in chat: ${chatId}`);
-
-                    // First check if bot has proper permissions
-                    const chatMember = await bot.getChatMember(
-                        chatId,
-                        botInfo.id
-                    );
-
-                    // Check if bot has permission to kick users
-                    if (
-                        !chatMember.can_restrict_members &&
-                        chatMember.status !== "administrator"
-                    ) {
-                        logger.error(
-                            "❌ Bot does not have admin permissions to kick members!"
-                        );
-                        await bot.sendMessage(
-                            config.ADMIN_USER_ID,
-                            `❌ CRITICAL: Bot lacks admin permissions in group ${chatId}!\nCannot kick user: ${userInfo}`
-                        );
-                        return;
-                    }
-
-                    // Kick the user immediately
-                    await bot.banChatMember(chatId, userId);
-                    logger.success(
-                        `🚫 Kicked non-whitelisted user: ${userInfo}`
-                    );
-
-                    // Send notification to group about the kick
-                    if (config.ANNOUNCE_KICKS) {
-                        try {
-                            await bot.sendMessage(
-                                chatId,
-                                `🚫 User ${newMember.first_name} was removed (not authorized)`
-                            );
-                        } catch (error) {
-                            logger.warn("Could not send kick notification", {
-                                error: error.message,
-                            });
-                        }
-                    }
-
-                    // Unban after a delay so they can try to join again if added to whitelist
-                    setTimeout(async () => {
-                        try {
-                            await bot.unbanChatMember(chatId, userId);
-                            logger.info(`🔓 Unbanned user: ${userInfo}`);
-                        } catch (error) {
-                            logger.warn("Could not unban user", {
-                                error: error.message,
-                            });
-                        }
-                    }, config.UNBAN_DELAY || 5000);
-
-                    // Notify admin
-                    try {
-                        await bot.sendMessage(
-                            config.ADMIN_USER_ID,
-                            `🚫 Automatically kicked user:\n${userInfo}\n\nReason: Not on whitelist\nGroup: ${
-                                msg.chat.title || chatId
-                            }`
-                        );
-                    } catch (error) {
-                        logger.warn("Could not notify admin", {
-                            error: error.message,
-                        });
-                    }
-                } catch (error) {
-                    // Handle both permission check errors and kick operation errors
-                    if (error.message.includes("invalid user_id specified")) {
-                        logger.error(
-                            `❌ Error checking permissions: Invalid chat ID or bot not in chat: ${chatId}`,
-                            {
-                                error: error.message,
-                            }
-                        );
-                    } else if (error.message.includes("getChatMember")) {
-                        logger.error(`❌ Error checking permissions:`, {
-                            error: error.message,
-                        });
-                    } else {
-                        logger.error(`❌ Failed to kick user: ${userInfo}`, {
-                            error: error.message,
-                        });
-                    }
-
-                    // Critical error - notify admin immediately
-                    try {
-                        await bot.sendMessage(
-                            config.ADMIN_USER_ID,
-                            `❌ CRITICAL ERROR: Failed to kick user!\n${userInfo}\nError: ${error.message}\n\nPlease check bot permissions!`
-                        );
-                    } catch (notifyError) {
-                        logger.error("Could not notify admin of kick failure", {
-                            error: notifyError.message,
-                        });
-                    }
-                }
+                // Use the new helper function for cleaner code
+                await kickUser(chatId, userId, userInfo, "Not on whitelist");
             } else {
                 // Just notify admin if auto-kick is disabled
                 try {
@@ -323,42 +349,13 @@ bot.on("chat_member", async (update) => {
             );
 
             if (config.AUTO_KICK_ENABLED) {
-                try {
-                    await bot.banChatMember(chatId, userId);
-                    logger.success(
-                        `🚫 Kicked non-whitelisted user: ${userInfo}`
-                    );
-
-                    // Unban after delay
-                    setTimeout(async () => {
-                        try {
-                            await bot.unbanChatMember(chatId, userId);
-                            logger.info(`🔓 Unbanned user: ${userInfo}`);
-                        } catch (error) {
-                            logger.warn("Could not unban user", {
-                                error: error.message,
-                            });
-                        }
-                    }, config.UNBAN_DELAY || 5000);
-
-                    // Notify admin
-                    try {
-                        await bot.sendMessage(
-                            config.ADMIN_USER_ID,
-                            `🚫 Kicked user added by admin:\n${userInfo}\n\nReason: Not on whitelist\nGroup: ${
-                                update.chat.title || chatId
-                            }`
-                        );
-                    } catch (error) {
-                        logger.warn("Could not notify admin", {
-                            error: error.message,
-                        });
-                    }
-                } catch (error) {
-                    logger.error(`❌ Failed to kick user: ${userInfo}`, {
-                        error: error.message,
-                    });
-                }
+                // Use the helper function for consistency
+                await kickUser(
+                    chatId,
+                    userId,
+                    userInfo,
+                    "Added by admin but not whitelisted"
+                );
             }
         }
     }
@@ -406,6 +403,8 @@ bot.onText(/\/status/, async (msg) => {
 📊 *Bot Status*
 
 🔘 Auto-kick: ${config.AUTO_KICK_ENABLED ? "✅ Enabled" : "❌ Disabled"}
+🔇 Silent mode: ${config.SILENT_MODE ? "✅ Enabled" : "❌ Disabled"}
+📢 Group messages: ${config.SILENT_MODE ? "❌ Disabled" : "✅ Enabled"}
 👥 Whitelist size: ${whitelist.getSize()} users
 🏠 Monitoring group: ${config.GROUP_ID}
 ⏰ Bot uptime: ${process.uptime().toFixed(0)} seconds
@@ -413,6 +412,12 @@ bot.onText(/\/status/, async (msg) => {
 💾 Data files:
 • Whitelist: ${config.WHITELIST_FILE}
 • Logs: ${config.LOG_FILE}
+
+${
+    config.SILENT_MODE
+        ? "🔇 Bot is running in silent mode - no group messages"
+        : "📢 Bot may send messages to group"
+}
   `;
 
     await bot.sendMessage(chatId, statusMessage, { parse_mode: "Markdown" });
@@ -612,6 +617,108 @@ bot.onText(/\/remove(?:\s+(@?\w+|\d+))?/, async (msg, match) => {
             { parse_mode: "Markdown" }
         );
     }
+});
+
+// Command: /debug (Admin only) - Show debug information
+bot.onText(/\/debug/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+
+    if (!isAdmin(userId)) {
+        await bot.sendMessage(chatId, config.MESSAGES.NOT_ADMIN);
+        return;
+    }
+
+    try {
+        const botInfo = await bot.getMe();
+        const debugInfo = `
+🔍 *Debug Information*
+
+**Bot Configuration:**
+• Bot Username: @${botInfo.username}
+• Bot ID: ${botInfo.id}
+• Configured Group ID: ${config.GROUP_ID}
+• Auto-kick Enabled: ${config.AUTO_KICK_ENABLED ? "✅" : "❌"}
+• Silent Mode: ${config.SILENT_MODE ? "✅" : "❌"}
+• Send Welcome Messages: ${config.SEND_WELCOME_MESSAGE ? "✅" : "❌"}
+• Announce Kicks: ${config.ANNOUNCE_KICKS ? "✅" : "❌"}
+• Notify Admin Only: ${config.NOTIFY_ADMIN_ONLY ? "✅" : "❌"}
+• Allow Bots: ${config.ALLOW_BOTS ? "✅" : "❌"}
+• Test Mode: ${global.testMode ? "✅" : "❌"}
+
+**Whitelist Status:**
+• Total Whitelisted Users: ${whitelist.getSize()}
+• Your ID: ${userId} ${whitelist.isWhitelisted(userId) ? "✅" : "❌"}
+
+**Timing Settings:**
+• Unban Delay: ${config.UNBAN_DELAY}ms
+• Instant Kick: ${config.INSTANT_KICK ? "✅" : "❌"}
+
+**Group Message Settings:**
+${
+    config.SILENT_MODE
+        ? "🔇 Silent mode: Bot will NOT send messages to group"
+        : "📢 Normal mode: Bot may send messages to group"
+}
+
+**Current Time:** ${new Date().toISOString()}
+        `;
+
+        await bot.sendMessage(chatId, debugInfo.trim(), {
+            parse_mode: "Markdown",
+        });
+    } catch (error) {
+        await bot.sendMessage(
+            chatId,
+            `❌ Error getting debug info: ${error.message}`
+        );
+        logger.error("Error in debug command:", { error: error.message });
+    }
+});
+
+// Command: /silent (Admin only) - Toggle silent mode
+bot.onText(/\/silent(?:\s+(on|off))?/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+
+    if (!isAdmin(userId)) {
+        await bot.sendMessage(chatId, config.MESSAGES.NOT_ADMIN);
+        return;
+    }
+
+    const mode = match[1];
+
+    if (!mode) {
+        await bot.sendMessage(
+            chatId,
+            `🔇 Silent mode is currently: ${
+                config.SILENT_MODE ? "ON" : "OFF"
+            }\n\n${
+                config.SILENT_MODE
+                    ? "Bot is NOT sending messages to the group."
+                    : "Bot MAY send messages to the group."
+            }\n\nUsage: /silent on|off`
+        );
+        return;
+    }
+
+    const newMode = mode === "on";
+
+    // Update config (note: this only affects runtime, not the config file)
+    config.SILENT_MODE = newMode;
+    config.SEND_WELCOME_MESSAGE = !newMode; // Disable welcome messages in silent mode
+    config.ANNOUNCE_KICKS = !newMode; // Disable kick announcements in silent mode
+
+    await bot.sendMessage(
+        chatId,
+        `🔇 Silent mode ${newMode ? "ENABLED" : "DISABLED"}\n\n${
+            newMode
+                ? "✅ Bot will NOT send any messages to the group.\n📱 All notifications will be sent to admin only."
+                : "⚠️ Bot MAY send messages to the group (welcome messages, kick notifications)."
+        }`
+    );
+
+    logger.info(`Silent mode ${newMode ? "enabled" : "disabled"} by admin`);
 });
 
 // Error handling
